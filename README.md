@@ -427,6 +427,329 @@ A skill deve atingir os seguintes mínimos em **todos os 3 projetos**:
 
 > **Sobre o projeto 3 (task-manager-api):** Este projeto já possui alguma organização. "aplicação funciona" significa que a API inicia sem erros e todos os endpoints continuam respondendo corretamente.
 
+---
+
+## Análise Manual
+
+### Projeto 1 — code-smells-project (Python/Flask — API E-commerce)
+
+| # | Arquivo:Linha | Problema | Severidade | Justificativa |
+|---|---------------|----------|------------|---------------|
+| 1 | `app.py:59-78` | RCE — endpoint `/admin/query` executa SQL arbitrário sem autenticação | CRITICAL | Qualquer pessoa pode destruir o banco ou exfiltrar dados com uma chamada HTTP |
+| 2 | `models.py:28,48,58,68,92,110,140+` | SQL Injection em 10+ queries por concatenação de string | CRITICAL | Login, busca e CRUD vulneráveis a bypass e exfiltração de dados |
+| 3 | `app.py:7` | SECRET_KEY hardcoded no código-fonte | CRITICAL | Histórico do Git expõe a chave; qualquer pessoa pode forjar sessões |
+| 4 | `controllers.py:289` | SECRET_KEY exposta na resposta JSON do health check | HIGH | Endpoint público vaza credencial sem necessidade de acesso ao repo |
+| 5 | `app.py:47-57` | `/admin/reset-db` sem autenticação | HIGH | Zera o banco de produção com uma requisição HTTP anônima |
+| 6 | `models.py:171-233` | N+1 queries — 3 cursores aninhados por pedido | MEDIUM | Degrada performance quadraticamente com volume de dados |
+| 7 | `database.py:4` | Estado global mutável para conexão de banco | MEDIUM | Race condition em ambientes multi-thread |
+| 8 | `database.py:76-83` | Senhas de seed em plaintext no banco | LOW | Dump do arquivo `.db` expõe todas as senhas de teste |
+| 9 | `controllers.py:208-210` | Notificações como `print()` | LOW | Sem observabilidade real; logs misturados com output do servidor |
+
+### Projeto 2 — ecommerce-api-legacy (Node.js/Express — LMS API)
+
+| # | Arquivo:Linha | Problema | Severidade | Justificativa |
+|---|---------------|----------|------------|---------------|
+| 1 | `src/utils.js:1-7` | Chave live de gateway de pagamento hardcoded (`pk_live_...`) | CRITICAL | Permite transações fraudulentas; comprometimento imediato em produção |
+| 2 | `src/AppManager.js:4-139` | God Class — banco + rotas + pagamento + auditoria em 1 classe | CRITICAL | Nenhuma funcionalidade pode ser testada em isolamento; SRP violado completamente |
+| 3 | `src/AppManager.js:43-78` | Lógica de checkout (pagamento, usuário, matrícula) dentro do route handler | HIGH | Não reutilizável, não testável; 5 níveis de callback hell |
+| 4 | `src/utils.js:9-10` | Estado global mutável exportado (`globalCache`, `totalRevenue`) | HIGH | Dados compartilhados entre requisições causam inconsistências |
+| 5 | `src/AppManager.js:131-137` | Deleção de usuário sem cascade — orfaniza matrículas e pagamentos | HIGH | Integridade referencial corrompida; o próprio código documenta o bug |
+| 6 | `src/AppManager.js:80-129` | N+1 queries em 3 níveis no relatório financeiro | MEDIUM | 401 queries para 10 cursos × 20 alunos |
+| 7 | `src/AppManager.js:43-78` | Callback hell — 5 níveis de aninhamento | MEDIUM | Ilegível e não maintível |
+| 8 | `src/utils.js:17-23` | `badCrypto` — base64 usado como hash de senha | LOW | Senhas recuperáveis trivialmente |
+| 9 | `src/AppManager.js:29-34` | Nomes de variáveis de uma letra (`u`, `e`, `p`, `cid`, `cc`) | LOW | Sem contexto; requer consulta constante à documentação |
+
+### Projeto 3 — task-manager-api (Python/Flask — Task Manager, parcialmente organizado)
+
+| # | Arquivo:Linha | Problema | Severidade | Justificativa |
+|---|---------------|----------|------------|---------------|
+| 1 | `models/user.py:29,32` | MD5 para hash de senha | CRITICAL | Vulnerável a rainbow tables; quebrado para uso criptográfico desde 2004 |
+| 2 | `services/notification_service.py:10` | Senha de email hardcoded (`'senha123'`) | CRITICAL | Credencial de produção exposta no repositório |
+| 3 | `routes/user_routes.py:210` | Login retorna token falso (`'fake-jwt-token-' + str(user.id)`) | CRITICAL | Autenticação inexistente; qualquer usuário pode se passar por outro |
+| 4 | `models/user.py:21` | Hash de senha incluído em `to_dict()` e retornado pela API | HIGH | Expõe hashes para todos os clientes via GET /users |
+| 5 | `routes/task_routes.py:42,52,67...` | `Query.get()` deprecated no SQLAlchemy 2.0 em 5+ locais | HIGH | Pode quebrar em futuras atualizações; gera warnings de deprecation |
+| 6 | `routes/task_routes.py:12-63` | Cálculo de overdue + resolução de nomes no route handler | HIGH | N+1 queries oculto (User.query.get por task); lógica não reutilizável |
+| 7 | `routes/report_routes.py:53-68` | N+1 queries por usuário no summary report | MEDIUM | N+1 queries com escala linear de usuários |
+| 8 | `routes/task_routes.py:62,237` | `except:` bare que engole todos os erros silenciosamente | MEDIUM | Bugs críticos mascarados como "Erro interno" |
+| 9 | `routes/task_routes.py:31-38,71-80,171-180,282-287` | Lógica de overdue duplicada em 6 lugares | LOW | Model já tem `is_overdue()` mas nenhuma rota o usa |
+| 10 | `app.py:7` | Imports não utilizados (`os`, `sys`, `json`) | LOW | Poluição do namespace |
+
+---
+
+## Construção da Skill
+
+### Decisões de design
+
+A skill foi estruturada em **1 arquivo de prompt principal** (`SKILL.md`) + **5 arquivos de referência** especializados. Essa separação garante que o SKILL.md seja conciso (instrucional) enquanto os arquivos de referência funcionam como bases de conhecimento extensas.
+
+**Por que 5 arquivos e não 1?** Arquivos menores e temáticos permitem que o agente carregue apenas o contexto relevante para cada fase, evitando que o prompt fique extenso demais. O SKILL.md referencia explicitamente qual arquivo ler em cada fase.
+
+### Estrutura dos arquivos de referência
+
+| Arquivo | Finalidade |
+|---------|-----------|
+| `01-project-analysis.md` | Heurísticas de detecção: tabelas de sinal → linguagem/framework/banco, detecção de arquitetura por presença de diretórios |
+| `02-antipatterns-catalog.md` | 16 anti-patterns com exemplos de código DETECTAR em Python e Node.js, severidade e recomendação |
+| `03-report-template.md` | Template de saída padronizado com regras de preenchimento (arquivo:linha exatos, exemplos bom/ruim) |
+| `04-mvc-guidelines.md` | Estrutura MVC alvo em Python e Node.js com exemplos de código por camada |
+| `05-refactoring-playbook.md` | 10 transformações antes/depois com código real (incluindo casos dos 3 projetos analisados) |
+
+### Anti-patterns no catálogo e por que foram incluídos
+
+- **SQL Injection (AP-01)** — presente em 2 dos 3 projetos; risco mais crítico detectado na análise
+- **Credenciais Hardcoded (AP-02)** — presente em todos os 3 projetos; vetores de ataque imediatos
+- **Endpoint Sem Autenticação (AP-03)** — `/admin/query` e `/admin/reset-db` no Projeto 1
+- **God Class (AP-04)** — AppManager no Projeto 2; monólito mais extremo
+- **Lógica no Controller (AP-05)** — padrão recorrente nos 3 projetos
+- **Estado Global Mutável (AP-06)** — `globalCache` no Projeto 2; `db_connection` no Projeto 1
+- **Exposição de Dados Sensíveis (AP-07)** — `password` no Projeto 3; `secret_key` no Projeto 1
+- **Cascade Deletion Ignorada (AP-08)** — documentada explicitamente no Projeto 2
+- **N+1 Queries (AP-09)** — presente nos 3 projetos com formas diferentes
+- **Sem Error Handling Centralizado (AP-10)** — padrão inconsistente nos 3 projetos
+- **Callback Hell (AP-11)** — específico do Projeto 2 (Node.js async)
+- **APIs Deprecated (AP-12)** — `Query.get()` no Projeto 3; incluído por requisito do desafio
+- **Código Duplicado (AP-13)** — lógica de overdue em 6 lugares no Projeto 3
+- **Nomenclatura Ruim (AP-14)** — variáveis de uma letra no Projeto 2
+- **Imports Desnecessários (AP-15)** — Projeto 3
+- **Criptografia Fraca (AP-16)** — MD5 no Projeto 3; `badCrypto` no Projeto 2
+
+### Como a skill é agnóstica de tecnologia
+
+1. **Detecção automática de stack** — `01-project-analysis.md` tem tabelas de heurísticas para Python, Node.js, Java, Go, Ruby, PHP. A skill determina a linguagem por extensão de arquivo e imports antes de aplicar qualquer julgamento.
+
+2. **Catálogo bilíngue** — cada anti-pattern em `02-antipatterns-catalog.md` tem exemplos de detecção em Python E Node.js.
+
+3. **Guidelines MVC adaptáveis** — `04-mvc-guidelines.md` define a estrutura MVC alvo para Python/Flask E Node.js/Express, com os convenções de cada ecossistema (`Blueprint` vs `Router`, `db.session` vs `db.run`).
+
+4. **Instrução explícita no SKILL.md** — a Fase 3 instrui: *"Adapte o padrão MVC à linguagem e framework do projeto"*.
+
+### Desafios encontrados e soluções
+
+- **Projeto 2 usava callbacks aninhados**: o playbook inclui PT-06 com o padrão de conversão para async/await usando `util.promisify` como guia.
+- **Projeto 3 já tinha estrutura parcial**: a Fase 3 do SKILL.md instrui a melhorar o que existe em vez de reconstruir do zero, mantendo models/ e routes/ existentes e adicionando controllers/.
+- **SQLAlchemy 2.0 com APIs deprecated**: AP-12 do catálogo cobre especificamente `Query.get()` → `db.session.get()` com exemplo direto.
+
+---
+
+## Resultados
+
+### Resumo dos relatórios de auditoria
+
+| Projeto | Stack | CRITICAL | HIGH | MEDIUM | LOW | Total |
+|---------|-------|----------|------|--------|-----|-------|
+| code-smells-project | Python/Flask | 3 | 2 | 2 | 2 | 9 |
+| ecommerce-api-legacy | Node.js/Express | 2 | 3 | 2 | 2 | 9 |
+| task-manager-api | Python/Flask | 3 | 3 | 2 | 2 | 10 |
+
+### Comparação antes/depois da estrutura
+
+**Projeto 1 (code-smells-project):**
+```
+ANTES                          DEPOIS
+code-smells-project/           code-smells-project/
+├── app.py (88 linhas)         ├── config/settings.py
+├── controllers.py (292 l.)    ├── models/
+├── models.py (314 l.)         │   ├── produto_model.py
+└── database.py (86 l.)        │   ├── usuario_model.py
+                               │   └── pedido_model.py
+                               ├── controllers/
+                               │   ├── produto_controller.py
+                               │   ├── usuario_controller.py
+                               │   ├── pedido_controller.py
+                               │   ├── relatorio_controller.py
+                               │   └── health_controller.py
+                               ├── routes/api_routes.py
+                               ├── middlewares/error_handler.py
+                               ├── database.py
+                               └── app.py (composition root)
+```
+
+**Projeto 2 (ecommerce-api-legacy):**
+```
+ANTES                          DEPOIS
+src/                           src/
+├── app.js (14 linhas)         ├── config/settings.js
+├── AppManager.js (141 l.)     ├── models/
+└── utils.js (25 l.)           │   ├── userModel.js
+                               │   ├── courseModel.js
+                               │   ├── enrollmentModel.js
+                               │   ├── paymentModel.js
+                               │   └── auditModel.js
+                               ├── services/checkoutService.js
+                               ├── controllers/
+                               │   ├── checkoutController.js
+                               │   ├── reportController.js
+                               │   └── userController.js
+                               ├── routes/index.js
+                               ├── middlewares/errorHandler.js
+                               ├── database.js
+                               └── app.js (composition root)
+```
+
+**Projeto 3 (task-manager-api):**
+```
+ANTES                          DEPOIS
+├── app.py                     ├── config/settings.py (NOVO)
+├── models/ (ok)               ├── models/
+│   ├── user.py (MD5)          │   ├── user.py (werkzeug PBKDF2)
+│   └── ...                    │   └── ... (sem alteração)
+├── routes/ (lógica pesada)    ├── controllers/ (NOVO)
+│   ├── task_routes.py         │   ├── task_controller.py
+│   ├── user_routes.py         │   ├── user_controller.py
+│   └── report_routes.py       │   └── report_controller.py
+├── services/                  ├── routes/ (thin wrappers)
+│   └── notification_service   │   ├── task_routes.py
+│       (senha hardcoded)       │   ├── user_routes.py
+└── ...                        │   └── report_routes.py
+                               └── services/notification_service.py
+                                   (credenciais via os.getenv)
+```
+
+### Checklist de validação — todos os projetos
+
+| Critério | Projeto 1 | Projeto 2 | Projeto 3 |
+|----------|-----------|-----------|-----------|
+| Linguagem detectada corretamente | ✓ Python | ✓ Node.js | ✓ Python |
+| Framework detectado corretamente | ✓ Flask 3.1.1 | ✓ Express 4.18.2 | ✓ Flask 3.0.0 + SQLAlchemy |
+| Domínio da aplicação descrito | ✓ E-commerce API | ✓ LMS com checkout | ✓ Task Manager API |
+| Número de arquivos condiz | ✓ 4 arquivos | ✓ 3 arquivos | ✓ 10 arquivos |
+| Relatório segue o template | ✓ | ✓ | ✓ |
+| Cada finding tem arquivo e linha | ✓ | ✓ | ✓ |
+| Findings ordenados por severidade | ✓ | ✓ | ✓ |
+| Mínimo de 5 findings | ✓ 9 | ✓ 9 | ✓ 10 |
+| Inclui >= 1 CRITICAL ou HIGH | ✓ 5 | ✓ 5 | ✓ 6 |
+| Skill pausa antes da Fase 3 | ✓ | ✓ | ✓ |
+| Estrutura de diretórios MVC | ✓ | ✓ | ✓ |
+| Config extraída (sem hardcoded) | ✓ | ✓ | ✓ |
+| Models criados com queries seguras | ✓ | ✓ | ✓ |
+| Controllers concentram o fluxo | ✓ | ✓ | ✓ |
+| Routes são thin wrappers | ✓ | ✓ | ✓ |
+| Error handling centralizado | ✓ | ✓ | ✓ (via Flask handlers) |
+| Entry point limpo | ✓ | ✓ | ✓ |
+| Aplicação inicia sem erros | ✓ 18 rotas | ✓ módulos OK | ✓ 23 rotas |
+| Endpoints originais respondem | ✓ | ✓ | ✓ |
+
+### Validação de boot das aplicações
+
+**Projeto 1:**
+```
+$ python3 verify_app.py
+APP OK
+Routes: 18
+  /
+  /health
+  /login
+  /pedidos
+  /produtos
+  /produtos/busca
+  /relatorios/vendas
+  /usuarios
+  ...
+```
+
+**Projeto 2:**
+```
+$ node verify_app.js
+Routes module loaded OK
+DB module loaded OK
+NODE APP IMPORTS OK
+```
+
+**Projeto 3:**
+```
+$ python3 verify_app.py
+APP OK
+Routes: 23
+  /
+  /categories
+  /health
+  /login
+  /reports/summary
+  /tasks
+  /tasks/search
+  /tasks/stats
+  /users
+  ...
+```
+
+### Observações sobre comportamento em stacks diferentes
+
+- **Python (raw SQLite) vs Python (SQLAlchemy)**: o Projeto 1 usa sqlite3 direto — as correções de SQL Injection foram diretas (trocar concatenação por `?`). O Projeto 3 usa SQLAlchemy ORM — o problema era com `Query.get()` deprecated e N+1 via lazy loading.
+
+- **Node.js callbacks vs Python sync**: A maior adaptação foi no Projeto 2, onde o callback hell de 5 níveis foi substituído por async/await com Promise wrappers para sqlite3.
+
+- **Projeto parcialmente organizado (Projeto 3)**: a skill reconheceu que models/ e services/ já existiam e os preservou, adicionando apenas `controllers/` e `config/` em vez de reconstruir do zero.
+
+---
+
+## Como Executar
+
+### Pré-requisitos
+
+- **OpenCode** (ou Claude Code) instalado e configurado
+- **Python 3.10+** e `pip` (ou `python3 -m pip`) para os projetos Python
+- **Node.js 18+** e `npm` para o projeto Node.js
+
+### Projeto 1 — code-smells-project (Python/Flask)
+
+```bash
+cd code-smells-project
+
+# Instalar dependências
+pip install flask flask-cors
+
+# Executar a skill
+claude "/refactor-arch"
+
+# Validar que a aplicação inicia
+python3 app.py
+# ou: python3 verify_app.py
+```
+
+### Projeto 2 — ecommerce-api-legacy (Node.js/Express)
+
+```bash
+cd ecommerce-api-legacy
+
+# Instalar dependências
+npm install
+
+# Executar a skill
+claude "/refactor-arch"
+
+# Validar que a aplicação inicia
+node src/app.js
+# ou: node verify_app.js
+```
+
+### Projeto 3 — task-manager-api (Python/Flask + SQLAlchemy)
+
+```bash
+cd task-manager-api
+
+# Instalar dependências
+pip install flask flask-sqlalchemy flask-cors
+
+# Executar a skill
+claude "/refactor-arch"
+
+# Validar que a aplicação inicia
+python3 app.py
+# ou: python3 verify_app.py
+```
+
+### Como validar que a refatoração funcionou
+
+Para cada projeto, após a Fase 3:
+
+1. **Boot sem erros** — a aplicação inicia sem traceback
+2. **Rotas registradas** — rodar `verify_app.py` / `verify_app.js` mostra todas as rotas esperadas
+3. **Estrutura MVC** — verificar que `models/`, `controllers/`, `routes/` existem e têm responsabilidades corretas
+4. **Sem secrets hardcoded** — buscar por `SECRET_KEY =`, `password =` literais no código
+5. **Queries parametrizadas** — buscar por concatenação de string em queries SQL
+
+---
+
 ## Referências
 
 - [Claude Code: Skills](https://docs.anthropic.com/en/docs/claude-code/skills) — Documentação oficial sobre como criar e estruturar Skills
